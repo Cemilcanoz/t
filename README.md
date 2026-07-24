@@ -74,12 +74,19 @@ Yeni dil eklemek için: **Ayarlar > Zaman ve Dil > Dil ve bölge > Dil ekle**
 
 ## Ölçülen kaynak kullanımı
 
+Windows 11, tek 1536×864 ekran, 16 çekirdek üzerinde `T.exe` ile ölçüldü:
+
 | | |
 |---|---|
-| Boşta CPU | %0 (15 sn ölçüm) |
-| RAM | ~117 MB, sabit |
+| Boşta CPU | **%0** (12 sn boyunca 0 ms) |
+| RAM | 78 MB, sabit |
+| Açılış süresi | ~3.5 sn (tek dosya .exe kendini geçici klasöre açar) |
 | OCR süresi | ~0.05 sn |
 | Çeviri süresi | ~1.5–3 sn (internet hızına bağlı) |
+| `T.exe` boyutu | 58 MB |
+
+Boşta CPU'nun sıfır olması tasarım gereği: ekran sürekli taranmaz, yalnızca
+kısayola basıldığında tek bir kare yakalanır.
 
 ## Modüller
 

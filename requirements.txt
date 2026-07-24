@@ -1,0 +1,5 @@
+PySide6>=6.6
+deep-translator>=1.11
+winocr>=0.0.15
+keyboard>=0.13.5
+Pillow>=10.0

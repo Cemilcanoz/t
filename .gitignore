@@ -1,0 +1,25 @@
+# Sanal ortam — herkes kendi bilgisayarında oluşturur, depoya girmez
+venv/
+.venv/
+env/
+
+# PyInstaller çıktıları — .exe GitHub Releases'e yüklenir, depoya değil
+build/
+dist/
+*.manifest
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Üretilen dosyalar
+assets/icon.ico
+
+# Editör / işletim sistemi
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

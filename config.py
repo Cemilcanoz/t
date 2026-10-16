@@ -4,12 +4,13 @@ import os
 from pathlib import Path
 
 DEFAULTS = {
+    "provider": "mymemory",    # documented free API; Google remains selectable
     "target_lang": "tr",        # hedef dil (çeviri)
     "ocr_lang": "en",           # ekrandan okunacak metnin dili
     "hotkey": "alt+t",          # global kısayol
     "font_size": 14,
-    "text_color": "#FFFFFF",
-    "bg_opacity": 0.88,         # kart arka plan opaklığı (0-1)
+    "text_color": "#F5F1DF",
+    "bg_opacity": 0.98,         # kart arka plan opaklığı (0-1)
     "show_floating_logo": True,
     "logo_pos": None,           # [x, y] — yüzen logonun son konumu
     "shortcut_asked": False,    # ilk açılışta "masaüstüne kısayol?" soruldu mu

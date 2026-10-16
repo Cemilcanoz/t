@@ -12,13 +12,14 @@ from PySide6.QtCore import Qt, QRect, QRectF, Signal
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
-ACCENT = QColor("#7C5CFF")
+ACCENT = QColor("#c0fa45")
 MIN_SELECTION = 8  # px — bundan küçük seçimler kazara tıklama sayılır
 
 
 class SnipOverlay(QWidget):
     region_selected = Signal(QPixmap, QRect)  # kırpılmış görüntü + global konum
     cancelled = Signal()
+    failed = Signal(str)
     _esc_pressed = Signal()                   # keyboard thread'inden ana thread'e
 
     def __init__(self):
@@ -41,8 +42,15 @@ class SnipOverlay(QWidget):
     def start(self):
         # Fare hangi ekrandaysa o ekranı yakala (çoklu monitör desteği)
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            self.failed.emit("Ekran bulunamadı. Uygulamayı yeniden başlatmayı deneyin.")
+            return
         self._geo = screen.geometry()
         self._shot = screen.grabWindow(0)  # overlay açılmadan ÖNCE tek kare al
+        if self._shot.isNull():
+            self._shot = None
+            self.failed.emit("Ekran görüntüsü alınamadı. Biraz sonra yeniden deneyin.")
+            return
         self._origin = self._cur = None
         self.setGeometry(self._geo)
         self.show()
@@ -97,7 +105,9 @@ class SnipOverlay(QWidget):
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.MouseButton.LeftButton or self._origin is None:
             return
-        rect = QRect(self._origin, self._cur).normalized()
+        # Son mouseMove olayı henüz işlenmemiş olsa da bırakılan nokta doğrudur.
+        rect = QRect(self._origin, e.position().toPoint()).normalized()
+        rect = rect.intersected(self.rect())
         self._origin = self._cur = None
         self._finish()
 
@@ -106,15 +116,10 @@ class SnipOverlay(QWidget):
             return
 
         # Yüksek DPI ekranlarda mantıksal -> fiziksel piksel dönüşümü
-        dpr = self._shot.devicePixelRatio()
-        crop = self._shot.copy(
-            QRect(
-                round(rect.x() * dpr),
-                round(rect.y() * dpr),
-                round(rect.width() * dpr),
-                round(rect.height() * dpr),
-            )
-        )
+        crop = crop_selection(self._shot, rect)
+        if crop.isNull():
+            self.failed.emit("Seçilen alanın ekran görüntüsü alınamadı.")
+            return
         self.region_selected.emit(crop, rect.translated(self._geo.topLeft()))
 
     # --- çizim --------------------------------------------------------------
@@ -140,3 +145,12 @@ class SnipOverlay(QWidget):
                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
                 "Çevrilecek alanı sürükleyerek seç  •  İptal: Esc / Sağ tık",
             )
+
+
+def crop_selection(shot: QPixmap, rect: QRect) -> QPixmap:
+    """Mantıksal seçim koordinatlarını fiziksel ekran piksellerine çevir."""
+    dpr = shot.devicePixelRatio()
+    x1, y1 = round(rect.x() * dpr), round(rect.y() * dpr)
+    x2, y2 = round((rect.x() + rect.width()) * dpr), round((rect.y() + rect.height()) * dpr)
+    physical = QRect(x1, y1, x2 - x1, y2 - y1).intersected(shot.rect())
+    return shot.copy(physical) if not physical.isEmpty() else QPixmap()

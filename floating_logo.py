@@ -1,10 +1,10 @@
 """Ekranda yüzen, sürüklenebilir, yarı saydam 'T' logosu.
 Tıklayınca ekran seçimi başlatır."""
-from PySide6.QtCore import Qt, QPoint, Signal
-from PySide6.QtGui import QPainter, QPixmap
+from PySide6.QtCore import Qt, QPoint, QRectF, Signal
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
-SIZE = 52
+SIZE = 56
 DRAG_THRESHOLD = 6  # px — bundan az hareket "tıklama" sayılır
 
 
@@ -30,18 +30,39 @@ class FloatingLogo(QWidget):
         self._press_global = None
         self._press_window = None
         self._dragging = False
-        self.setWindowOpacity(0.65)
+        self._hovered = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName("T ekran çevirisi başlat")
+        self.setWindowOpacity(0.88)
 
     def enterEvent(self, e):
+        self._hovered = True
         self.setWindowOpacity(1.0)
+        self.update()
 
     def leaveEvent(self, e):
-        self.setWindowOpacity(0.65)
+        self._hovered = False
+        self.setWindowOpacity(0.88)
+        self.update()
 
     def paintEvent(self, e):
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        p.drawPixmap(self.rect(), self._pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 45))
+        p.drawRoundedRect(QRectF(4, 6, 48, 48), 5, 5)
+        gradient = QLinearGradient(5, 4, 49, 51)
+        gradient.setColorAt(0, QColor("#c0fa45"))
+        gradient.setColorAt(1, QColor("#c0fa45"))
+        p.setBrush(gradient)
+        p.setPen(QPen(QColor("#f5f1df" if self._hovered else "#10251d"), 1.2))
+        p.drawRoundedRect(QRectF(4, 3, 48, 48), 4, 4)
+        p.setPen(QColor("#10251d"))
+        p.setFont(QFont("Georgia", 27))
+        p.drawText(QRectF(4, 1, 48, 48), Qt.AlignmentFlag.AlignCenter, "T")
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#f5f1df"))
+        p.drawEllipse(QRectF(41, 41, 8, 8))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:

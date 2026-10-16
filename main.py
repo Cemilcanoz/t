@@ -2,6 +2,7 @@
 import io
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from PIL import Image
@@ -12,6 +13,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 import config
+import crash_reporter
 import ocr_engine
 import shortcut
 import translator
@@ -39,16 +41,16 @@ ICON_PATH = APP_DIR / "assets" / "icon.png"
 def load_icon() -> QIcon:
     if ICON_PATH.exists():
         return QIcon(str(ICON_PATH))
-    # Logo dosyası yoksa mor bir "T" çiz (uygulama yine de çalışsın)
+    # Logo dosyası yoksa aynı tipografik T işaretini çiz.
     pm = QPixmap(64, 64)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QColor("#7C5CFF"))
+    p.setBrush(QColor("#c0fa45"))
     p.setPen(Qt.PenStyle.NoPen)
-    p.drawRoundedRect(0, 0, 64, 64, 14, 14)
-    p.setPen(QColor("white"))
-    p.setFont(QFont("Segoe UI", 34, QFont.Weight.Bold))
+    p.drawRoundedRect(0, 0, 64, 64, 4, 4)
+    p.setPen(QColor("#10251d"))
+    p.setFont(QFont("Georgia", 36))
     p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "T")
     p.end()
     return QIcon(pm)
@@ -57,32 +59,47 @@ def load_icon() -> QIcon:
 class WorkerSignals(QObject):
     done = Signal(str, str)   # (orijinal, çeviri)
     error = Signal(str)
+    status = Signal(str)
+    recognized = Signal(str)
 
 
 class OcrTranslateWorker(QRunnable):
     """OCR + çeviri arka plan iş parçacığında çalışır, arayüz donmaz."""
 
-    def __init__(self, png_bytes: bytes, ocr_lang: str, target_lang: str):
+    def __init__(self, png_bytes: bytes, ocr_lang: str, target_lang: str, original: str = "", provider: str = "mymemory"):
         super().__init__()
         self.png_bytes = png_bytes
         self.ocr_lang = ocr_lang
         self.target_lang = target_lang
         self.signals = WorkerSignals()
+        self.original = original
+        self.provider = provider
+        self.cancelled = threading.Event()
 
     def run(self):
         try:
-            img = Image.open(io.BytesIO(self.png_bytes)).convert("RGB")
-            # Küçük seçimlerde (oyun altyazısı gibi) 2x büyütme OCR isabetini artırır
-            if img.width < 700:
-                img = img.resize((img.width * 2, img.height * 2), Image.LANCZOS)
-            original = ocr_engine.recognize(img, self.ocr_lang)
+            if self.cancelled.is_set():
+                return
+            original = self.original
+            if not original:
+                self.signals.status.emit("Ekrandaki metin okunuyor…")
+                img = Image.open(io.BytesIO(self.png_bytes)).convert("RGB")
+                original = ocr_engine.recognize(img, self.ocr_lang)
+            if self.cancelled.is_set():
+                return
             if not original:
                 self.signals.done.emit("", "")
                 return
-            translated = translator.translate(original, self.target_lang)
-            self.signals.done.emit(original, translated)
+            self.signals.recognized.emit(original)
+            self.signals.status.emit("Metin çevriliyor…")
+            translated = translator.translate(original, self.target_lang, cancel_event=self.cancelled,
+                                              provider=self.provider, source=self.ocr_lang)
+            if not self.cancelled.is_set():
+                self.signals.done.emit(original, translated)
         except Exception as e:
-            self.signals.error.emit(str(e))
+            crash_reporter.log_exception("OCR veya çeviri başarısız")
+            if not self.cancelled.is_set():
+                self.signals.error.emit(str(e))
 
 
 class TApp(QObject):
@@ -93,11 +110,17 @@ class TApp(QObject):
         self.icon = load_icon()
         self.pool = QThreadPool.globalInstance()
         self.card: ResultCard | None = None
+        self._request_id = 0
+        self._snip_pending = False
+        self._worker = None
+        self._last_capture = None
+        self._last_original = ""
 
         # Ekran seçimi
         self.overlay = SnipOverlay()
         self.overlay.region_selected.connect(self.on_region)
         self.overlay.cancelled.connect(self.restore_logo)
+        self.overlay.failed.connect(self.on_capture_error)
 
         # Yüzen logo
         self.logo = FloatingLogo(self.icon.pixmap(96, 96))
@@ -111,7 +134,7 @@ class TApp(QObject):
         # Global kısayol
         self.hotkeys = HotkeyManager()
         self.hotkeys.triggered.connect(self.trigger_snip)
-        self.hotkeys.register(self.cfg["hotkey"])
+        hotkey_ready = self.hotkeys.register(self.cfg["hotkey"])
 
         # Sistem tepsisi
         self.tray = QSystemTrayIcon(self.icon)
@@ -136,6 +159,16 @@ class TApp(QObject):
         self.tray.activated.connect(self.on_tray_activated)
         self._update_tooltip()
         self.tray.show()
+        if not hotkey_ready:
+            QTimer.singleShot(1000, self._notify_hotkey_failure)
+
+    def _notify_hotkey_failure(self):
+        self.tray.showMessage(
+            "T — Kısayol etkin değil",
+            f"{self.cfg['hotkey']} kaydedilemedi. Yüzen logo veya tepsi menüsüyle "
+            "çeviri yapabilirsiniz; başka bir kısayolu Ayarlar'dan seçin.",
+            self.icon,
+        )
 
     # --- akış ---
 
@@ -144,43 +177,109 @@ class TApp(QObject):
             self.trigger_snip()
 
     def trigger_snip(self):
-        if self.overlay.isVisible():
+        if self._snip_pending or self.overlay.isVisible():
             return
+        self._snip_pending = True
+        self._request_id += 1
+        if getattr(self, "_worker", None) is not None:
+            self._worker.cancelled.set()
         # Kart ve logo ekran görüntüsüne girmesin
         if self.card is not None:
             self.card.close()
             self.card = None
         self.logo.hide()
-        QTimer.singleShot(180, self.overlay.start)
+        QTimer.singleShot(180, self._start_overlay)
+
+    def _start_overlay(self):
+        self._snip_pending = False
+        try:
+            self.overlay.start()
+        except Exception:
+            crash_reporter.log_exception("Ekran yakalama başlatılırken hata")
+            self.on_capture_error("Ekran seçimi başlatılamadı. Ayrıntı çökme günlüğüne yazıldı.")
 
     def restore_logo(self):
+        self._snip_pending = False
         if self.cfg["show_floating_logo"]:
             self.logo.show()
 
+    def on_capture_error(self, message: str):
+        self.restore_logo()
+        self.tray.showMessage("T — Ekran yakalama hatası", message, self.icon)
+
     def on_region(self, pixmap: QPixmap, rect: QRect):
         self.restore_logo()
+        # Önceki OCR/çeviri işi hâlâ sürüyorsa sonucunun bu yeni karta
+        # yazılmasını engellemek için her seçime benzersiz bir kimlik ver.
+        self._request_id += 1
+        request_id = self._request_id
         buf = QBuffer()
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        pixmap.save(buf, "PNG")
+        if (
+            pixmap.isNull()
+            or not buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            or not pixmap.save(buf, "PNG")
+        ):
+            self.on_capture_error("Seçilen alan görüntü dosyasına dönüştürülemedi.")
+            return
 
         self.card = ResultCard(self.cfg)
         self.card.show_for_rect(rect)
         self.card.set_loading()
 
+        self._last_capture = bytes(buf.data())
+        self._last_original = ""
+        self.card.retry_requested.connect(self.retry_translation)
+        self.card.new_selection_requested.connect(self.trigger_snip)
+        self.card.settings_requested.connect(self.open_settings)
+        self._submit_worker(request_id)
+
+    def _submit_worker(self, request_id: int):
         worker = OcrTranslateWorker(
-            bytes(buf.data()), self.cfg["ocr_lang"], self.cfg["target_lang"]
+            self._last_capture, self.cfg["ocr_lang"], self.cfg["target_lang"],
+            self._last_original,
+            provider=self.cfg.get("provider", "mymemory"),
         )
-        worker.signals.done.connect(self.on_done)
-        worker.signals.error.connect(self.on_error)
+        self._worker = worker
+        worker.signals.done.connect(
+            lambda original, translated, rid=request_id: self.on_done(
+                rid, original, translated
+            )
+        )
+        worker.signals.error.connect(
+            lambda msg, rid=request_id: self.on_error(rid, msg)
+        )
+        worker.signals.status.connect(
+            lambda msg, rid=request_id: self.on_status(rid, msg)
+        )
+        worker.signals.recognized.connect(
+            lambda text, rid=request_id: self.on_recognized(rid, text)
+        )
         self.pool.start(worker)
 
-    def on_done(self, original: str, translated: str):
-        if self.card is not None:
+    def retry_translation(self):
+        if self.card is None or self._last_capture is None:
+            return
+        if self._worker is not None:
+            self._worker.cancelled.set()
+        self._request_id += 1
+        self.card.set_loading()
+        self._submit_worker(self._request_id)
+
+    def on_status(self, request_id: int, message: str):
+        if request_id == self._request_id and self.card is not None:
+            self.card.set_status(message)
+
+    def on_recognized(self, request_id: int, original: str):
+        if request_id == self._request_id:
+            self._last_original = original
+
+    def on_done(self, request_id: int, original: str, translated: str):
+        if request_id == self._request_id and self.card is not None:
             self.card.set_result(original, translated)
 
-    def on_error(self, msg: str):
-        if self.card is not None:
-            self.card.set_error(msg)
+    def on_error(self, request_id: int, msg: str):
+        if request_id == self._request_id and self.card is not None:
+            self.card.set_error(msg, getattr(self, "_last_original", ""))
 
     # --- ayarlar / durum ---
 
@@ -198,8 +297,19 @@ class TApp(QObject):
         if dlg.exec():
             self.cfg = dlg.result_cfg()
             config.save(self.cfg)
-            self.hotkeys.register(self.cfg["hotkey"])
+            if not self.hotkeys.register(self.cfg["hotkey"]):
+                self._notify_hotkey_failure()
             self._update_tooltip()
+            if self.card is not None and self._last_capture is not None:
+                geometry = self.card.geometry()
+                self.card.close()
+                self.card = ResultCard(self.cfg)
+                self.card.setGeometry(geometry)
+                self.card.retry_requested.connect(self.retry_translation)
+                self.card.new_selection_requested.connect(self.trigger_snip)
+                self.card.settings_requested.connect(self.open_settings)
+                self.card.show()
+                self.retry_translation()
 
     def _update_tooltip(self):
         self.tray.setToolTip(f"T — Ekran Çevirisi  ({self.cfg['hotkey']})")
@@ -243,6 +353,8 @@ class TApp(QObject):
             self.create_shortcut()
 
     def quit(self):
+        if self._worker is not None:
+            self._worker.cancelled.set()
         self.hotkeys.unregister()
         self.tray.hide()
         self.app.quit()
@@ -312,7 +424,8 @@ def selftest() -> int:
     log()
 
     try:
-        translated = translator.translate(original or probe, cfg["target_lang"])
+        translated = translator.translate(original or probe, cfg["target_lang"],
+                                          provider=cfg.get("provider", "mymemory"), source=cfg["ocr_lang"])
         log(f"Çeviri       : {translated or '(boş)'}")
         log(f"Çeviri sonucu: {'BAŞARILI' if translated else 'BAŞARISIZ'}")
         if not translated:
@@ -340,6 +453,7 @@ def selftest() -> int:
 
 
 def main():
+    crash_reporter.install()
     if "--selftest" in sys.argv:
         sys.exit(selftest())
 
@@ -348,6 +462,8 @@ def main():
     app.setQuitOnLastWindowClosed(False)  # pencereler kapansa da tepside yaşamaya devam
     app.setWindowIcon(load_icon())
     t = TApp(app)  # noqa: F841 — referans tutulmalı
+    if "--settings" in sys.argv:
+        QTimer.singleShot(100, t.open_settings)
     QTimer.singleShot(600, t.maybe_offer_shortcut)  # tepsi yerleştikten sonra sor
     sys.exit(app.exec())
 
